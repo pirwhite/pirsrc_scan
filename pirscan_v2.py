@@ -930,7 +930,7 @@ class ScanResultExporter:
 
 # -------------------------- 病毒特征管理模块 --------------------------
 class SignatureManager:
-    """病毒特征管理工具，支持导入、导出和标准化"""
+    """病毒特征管理工具，支持导入、导出和标准化（优化版）"""
     
     def __init__(self, scanner):
         self.scanner = scanner
@@ -945,15 +945,7 @@ class SignatureManager:
         os.makedirs(SIGNATURES_DIR, exist_ok=True)
     
     def export_signatures(self, file_path: Optional[str] = None) -> str:
-        """
-        导出病毒特征为JSON文件
-        
-        Args:
-            file_path: 导出路径，None则使用默认路径
-            
-        Returns:
-            保存的JSON文件路径
-        """
+        """导出病毒特征为JSON文件（保持原有逻辑）"""
         try:
             if not file_path:
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -989,16 +981,25 @@ class SignatureManager:
             self.scanner.log(f"导出病毒特征失败: {str(e)}", "ERROR")
             return ""
     
+    def _get_unique_signature_id(self, base_id: str) -> str:
+        """生成唯一的特征ID（处理重复）"""
+        existing_ids = {sig.signature_id for sig in self.scanner.signatures}
+        if base_id not in existing_ids:
+            return base_id
+        
+        # 重复时添加计数器后缀
+        counter = 1
+        new_id = f"{base_id}_{counter}"
+        while new_id in existing_ids:
+            counter += 1
+            new_id = f"{base_id}_{counter}"
+        return new_id
+    
     def import_signatures(self, file_path: str, merge: bool = True) -> bool:
         """
-        从JSON文件导入病毒特征
-        
-        Args:
-            file_path: JSON文件路径
-            merge: 是否合并到现有特征库，False则替换
-            
-        Returns:
-            是否导入成功
+        从JSON文件导入病毒特征（优化版）
+        - 确保所有有效特征都能被添加并显示
+        - 重复特征会自动重命名而非过滤
         """
         try:
             if not os.path.exists(file_path):
@@ -1009,22 +1010,47 @@ class SignatureManager:
             with open(file_path, "r", encoding="utf-8") as f:
                 signatures_data = json.load(f)
             
-            # 标准化并验证特征数据
+            # 确保数据是列表格式
+            if not isinstance(signatures_data, list):
+                signatures_data = [signatures_data]
+                self.scanner.log("特征文件为单个特征，自动转换为列表格式", "INFO")
+            
             valid_signatures = []
-            for data in signatures_data:
+            invalid_count = 0
+            
+            for idx, data in enumerate(signatures_data):
                 # 标准化特征数据
-                standardized = self.standardize_signature(data)
+                try:
+                    standardized = self.standardize_signature(data)
+                except Exception as e:
+                    self.scanner.log(f"第{idx+1}个特征标准化失败: {str(e)}", "WARNING")
+                    invalid_count += 1
+                    continue
                 
                 # 验证必要字段
                 missing_fields = [f for f in self.required_fields if f not in standardized]
                 if missing_fields:
-                    self.scanner.log(f"特征数据不完整，缺少字段: {', '.join(missing_fields)}", "WARNING")
+                    self.scanner.log(
+                        f"第{idx+1}个特征数据不完整，缺少字段: {', '.join(missing_fields)}", 
+                        "WARNING"
+                    )
+                    invalid_count += 1
                     continue
                 
-                # 创建VirusSignature对象
+                # 创建VirusSignature对象（处理重复ID）
                 try:
+                    # 生成唯一ID（关键修改：重复ID自动重命名）
+                    unique_id = self._get_unique_signature_id(standardized["signature_id"])
+                    
+                    # 如果ID被修改，记录日志
+                    if unique_id != standardized["signature_id"]:
+                        self.scanner.log(
+                            f"特征ID '{standardized['signature_id']}' 已存在，自动重命名为 '{unique_id}'", 
+                            "INFO"
+                        )
+                    
                     signature = VirusSignature(
-                        signature_id=standardized["signature_id"],
+                        signature_id=unique_id,  # 使用唯一ID
                         name=standardized["name"],
                         description=standardized["description"],
                         file_names=standardized["file_names"],
@@ -1040,32 +1066,34 @@ class SignatureManager:
                     )
                     valid_signatures.append(signature)
                 except Exception as e:
-                    self.scanner.log(f"创建特征对象失败: {str(e)}", "WARNING")
+                    self.scanner.log(f"第{idx+1}个特征对象创建失败: {str(e)}", "WARNING")
+                    invalid_count += 1
                     continue
             
-            # 应用导入的特征
+            # 应用导入的特征（关键修改：确保全部添加，不过滤）
             if not merge:
                 self.scanner.signatures = []
+                self.scanner.log("已清空现有特征库", "INFO")
             
+            # 强制添加所有有效特征（包括重命名后的重复特征）
+            added_count = 0
             for sig in valid_signatures:
-                self.scanner.add_signature(sig)
+                self.scanner.signatures.append(sig)  # 直接添加，不做去重检查
+                added_count += 1
             
-            self.scanner.log(f"成功导入 {len(valid_signatures)} 个病毒特征", "SUCCESS")
-            return True
+            self.scanner.log(
+                f"特征导入完成 - 总处理: {len(signatures_data)}, "
+                f"有效并添加: {added_count}, "
+                f"无效: {invalid_count}", 
+                "SUCCESS"
+            )
+            return added_count > 0  # 只要有有效特征添加就算成功
         except Exception as e:
             self.scanner.log(f"导入病毒特征失败: {str(e)}", "ERROR")
             return False
     
     def standardize_signature(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        标准化病毒特征数据，确保格式正确
-        
-        Args:
-            data: 原始特征数据
-            
-        Returns:
-            标准化后的特征数据
-        """
+        """标准化病毒特征数据（保持原有逻辑，确保格式正确）"""
         standardized = {}
         
         # 处理必要字段
@@ -1090,7 +1118,7 @@ class SignatureManager:
         try:
             if "creation_date" in data:
                 # 尝试解析多种日期格式
-                date_formats = ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%Y/%m/%d"]
+                date_formats = ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%Y/%m/%d", "%Y-%m-%d %H:%M:%S"]
                 for fmt in date_formats:
                     try:
                         dt = datetime.datetime.strptime(str(data["creation_date"]), fmt)
@@ -1116,235 +1144,6 @@ class SignatureManager:
         except:
             standardized["threat_level"] = 3
             
-        return standardized
-    # -------------------------- 病毒特征管理模块 --------------------------
-class SignatureManager:
-    """病毒特征管理工具，支持导入、导出和标准化（优化版）"""
-    
-    def __init__(self, scanner):
-        self.scanner = scanner
-        self.required_fields = [
-            "signature_id", "name", "description", "file_names",
-            "file_hashes", "file_sizes", "registry_paths", "process_names",
-            "network_indicators", "file_paths", "creation_date",
-            "is_active", "threat_level"
-        ]
-        os.makedirs(SIGNATURES_DIR, exist_ok=True)
-        # 支持的日期格式扩展
-        self.date_formats = [
-            "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",  # ISO格式
-            "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",         # 带时间
-            "%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y"             # 仅日期
-        ]
-    
-    def export_signatures(self, file_path: Optional[str] = None) -> str:
-        # 保持原有导出逻辑不变（略）
-        ...
-    
-    def import_signatures(self, file_path: str, merge: bool = True) -> bool:
-        """优化版导入逻辑：增强错误捕获和日志提示"""
-        if not file_path:
-            self.scanner.log("未提供特征文件路径", "ERROR")
-            return False
-
-        # 基础文件检查
-        if not os.path.isfile(file_path):
-            self.scanner.log(f"特征文件不存在或不是文件: {file_path}", "ERROR")
-            return False
-        
-        try:
-            # 读取文件（增加编码检测和权限处理）
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    try:
-                        signatures_data = json.load(f)
-                    except json.JSONDecodeError as e:
-                        self.scanner.log(
-                            f"JSON格式错误: 在第{e.lineno}行第{e.colno}列 - {e.msg}", 
-                            "ERROR"
-                        )
-                        return False
-            except PermissionError:
-                self.scanner.log(f"无权限读取文件: {file_path}", "ERROR")
-                return False
-            except UnicodeDecodeError:
-                # 尝试其他编码
-                try:
-                    with open(file_path, "r", encoding="gbk") as f:
-                        signatures_data = json.load(f)
-                except:
-                    self.scanner.log(f"文件编码错误，无法解析: {file_path}", "ERROR")
-                    return False
-            except Exception as e:
-                self.scanner.log(f"读取文件失败: {str(e)}", "ERROR")
-                return False
-
-            # 确保数据是列表格式
-            if not isinstance(signatures_data, list):
-                signatures_data = [signatures_data]
-                self.scanner.log("特征文件为单个特征，自动转换为列表格式", "INFO")
-
-            valid_signatures = []
-            invalid_count = 0
-
-            for idx, data in enumerate(signatures_data):
-                if not isinstance(data, dict):
-                    self.scanner.log(f"第{idx+1}个特征不是字典格式，跳过", "WARNING")
-                    invalid_count += 1
-                    continue
-
-                # 标准化特征
-                try:
-                    standardized = self.standardize_signature(data)
-                except Exception as e:
-                    self.scanner.log(f"第{idx+1}个特征标准化失败: {str(e)}", "WARNING")
-                    invalid_count += 1
-                    continue
-
-                # 检查必填字段
-                missing_fields = [f for f in self.required_fields if f not in standardized]
-                if missing_fields:
-                    self.scanner.log(
-                        f"第{idx+1}个特征缺少必填字段: {', '.join(missing_fields)}，跳过", 
-                        "WARNING"
-                    )
-                    invalid_count += 1
-                    continue
-
-                # 验证并创建特征对象
-                try:
-                    # 严格验证日期格式
-                    creation_date = datetime.datetime.fromisoformat(standardized["creation_date"])
-                    
-                    # 验证数值类型
-                    if not isinstance(standardized["threat_level"], int):
-                        raise ValueError("威胁级别必须是整数")
-                    if not all(isinstance(s, int) for s in standardized["file_sizes"]):
-                        raise ValueError("文件大小必须是整数列表")
-
-                    signature = VirusSignature(
-                        signature_id=standardized["signature_id"],
-                        name=standardized["name"],
-                        description=standardized["description"],
-                        file_names=standardized["file_names"],
-                        file_hashes=standardized["file_hashes"],
-                        file_sizes=standardized["file_sizes"],
-                        registry_paths=standardized["registry_paths"],
-                        process_names=standardized["process_names"],
-                        network_indicators=standardized["network_indicators"],
-                        file_paths=standardized["file_paths"],
-                        creation_date=creation_date,
-                        is_active=standardized["is_active"],
-                        threat_level=standardized["threat_level"]
-                    )
-                    valid_signatures.append(signature)
-                except Exception as e:
-                    self.scanner.log(
-                        f"第{idx+1}个特征创建失败: {str(e)}，跳过", 
-                        "WARNING"
-                    )
-                    invalid_count += 1
-                    continue
-
-            # 应用导入结果
-            if not merge:
-                self.scanner.signatures = []
-                self.scanner.log("已清空现有特征库", "INFO")
-
-            # 去重并添加
-            added_count = 0
-            existing_ids = {s.signature_id for s in self.scanner.signatures}
-            for sig in valid_signatures:
-                if sig.signature_id not in existing_ids:
-                    self.scanner.add_signature(sig)
-                    existing_ids.add(sig.signature_id)
-                    added_count += 1
-
-            self.scanner.log(
-                f"特征导入完成 - 总数量: {len(signatures_data)}, "
-                f"有效: {len(valid_signatures)}, "
-                f"新增: {added_count}, "
-                f"无效/重复: {invalid_count + (len(valid_signatures) - added_count)}",
-                "SUCCESS"
-            )
-            return len(valid_signatures) > 0
-
-        except Exception as e:
-            self.scanner.log(f"导入过程发生未预期错误: {str(e)}", "ERROR")
-            return False
-    
-    def standardize_signature(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """优化版标准化：增强类型转换和兼容性"""
-        standardized = {}
-
-        # 处理ID（确保唯一）
-        base_id = data.get("signature_id", f"auto_gen_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}")
-        standardized["signature_id"] = base_id.strip()
-
-        # 处理字符串字段
-        standardized["name"] = str(data.get("name", "未命名特征")).strip()
-        standardized["description"] = str(data.get("description", "无描述")).strip()
-
-        # 处理列表字段（严格转换为列表，确保元素类型正确）
-        list_fields = {
-            "file_names": str,    # 文件名应为字符串
-            "file_hashes": str,   # 哈希应为字符串
-            "file_sizes": int,    # 大小应为整数
-            "registry_paths": str,
-            "process_names": str,
-            "network_indicators": str,
-            "file_paths": str
-        }
-        for field, elem_type in list_fields.items():
-            value = data.get(field, [])
-            # 确保是列表
-            if not isinstance(value, list):
-                value = [value] if value is not None else []
-            # 转换元素类型并过滤空值
-            standardized_list = []
-            for item in value:
-                try:
-                    # 特殊处理file_sizes的字符串转换（如"1024"转1024）
-                    if field == "file_sizes" and isinstance(item, str):
-                        standardized_item = int(item.strip())
-                    else:
-                        standardized_item = elem_type(item)
-                    standardized_list.append(standardized_item)
-                except:
-                    continue  # 跳过转换失败的元素
-            standardized[field] = standardized_list
-
-        # 处理日期（增强兼容性）
-        creation_date = data.get("creation_date")
-        if creation_date:
-            for fmt in self.date_formats:
-                try:
-                    dt = datetime.datetime.strptime(str(creation_date), fmt)
-                    standardized["creation_date"] = dt.isoformat()
-                    break
-                except ValueError:
-                    continue
-            else:
-                # 所有格式都失败时使用当前时间
-                standardized["creation_date"] = datetime.datetime.now().isoformat()
-                self.scanner.log(f"日期格式不支持: {creation_date}，已自动修正", "WARNING")
-        else:
-            standardized["creation_date"] = datetime.datetime.now().isoformat()
-
-        # 处理布尔值（支持字符串"true"/"false"）
-        is_active = data.get("is_active", True)
-        if isinstance(is_active, str):
-            is_active = is_active.lower() in ["true", "1", "yes"]
-        standardized["is_active"] = bool(is_active)
-
-        # 处理威胁级别（严格限制1-5）
-        threat_level = data.get("threat_level", 3)
-        try:
-            threat_level = int(threat_level)
-        except:
-            threat_level = 3
-        standardized["threat_level"] = max(1, min(5, threat_level))
-
         return standardized
 
 # -------------------------- 核心扫描器类 --------------------------
