@@ -13,13 +13,11 @@ import time
 import hashlib
 import shutil
 import zipfile
-import random
 import datetime
 import subprocess
 import glob
 from typing import List, Dict, Tuple, Optional, Any, Set
 import ipaddress
-import chardet
 
 # 尝试导入psutil库，如未安装则尝试自动安装
 try:
@@ -929,483 +927,7 @@ class ScanResultExporter:
             self.scanner.log(f"导出扫描结果失败: {str(e)}", "ERROR")
             return ""
 
-class VirusSignature:
-    """病毒特征类，存储恶意软件的特征信息"""
-    def __init__(self, signature_id: str, name: str, description: str,
-                 file_names: List[str], file_hashes: List[str], file_sizes: List[int],
-                 registry_paths: List[str], process_names: List[str],
-                 network_indicators: List[str], file_paths: List[str],
-                 creation_date: datetime.datetime, is_active: bool = True,
-                 threat_level: int = 3):
-        self.signature_id = signature_id
-        self.name = name
-        self.description = description
-        self.file_names = file_names
-        self.file_hashes = file_hashes
-        self.file_sizes = file_sizes
-        self.registry_paths = registry_paths
-        self.process_names = process_names
-        self.network_indicators = network_indicators
-        self.file_paths = file_paths
-        self.creation_date = creation_date
-        self.is_active = is_active
-        self.threat_level = max(1, min(5, threat_level))  # 确保威胁级别在1-5之间
-
-
-# 确保常量定义
-SIGNATURES_DIR = "virus_signatures"
-if not os.path.exists(SIGNATURES_DIR):
-    os.makedirs(SIGNATURES_DIR, exist_ok=True)
-
-class ImportDiagnostic:
-    """导入诊断诊断工具，帮助定位导入失败原因"""
-    @staticmethod
-    def check_file_access(file_path: str) -> Tuple[bool, str]:
-        """检查文件访问性"""
-        if not file_path:
-            return False, "未提供文件路径"
-            
-        if not os.path.exists(file_path):
-            return False, f"文件不存在: {file_path}"
-            
-        if not os.path.isfile(file_path):
-            return False, f"不是有效文件: {file_path}"
-            
-        if not os.access(file_path, os.R_OK):
-            return False, f"没有读取权限: {file_path}"
-            
-        if os.path.getsize(file_path) == 0:
-            return False, f"文件为空: {file_path}"
-            
-        return True, "文件检查通过"
-
-    @staticmethod
-    def detect_file_encoding(file_path: str) -> Tuple[str, float]:
-        """检测文件编码"""
-        try:
-            with open(file_path, 'rb') as f:
-                raw_data = f.read(4096)
-                result = chardet.detect(raw_data)
-                return result.get('encoding', 'utf-8'), result.get('confidence', 0.0)
-        except Exception as e:
-            return 'utf-8', 0.0
-
-    @staticmethod
-    def validate_json_structure(content: str) -> Tuple[bool, Any, str]:
-        """验证JSON结构"""
-        try:
-            data = json.loads(content)
-            if not isinstance(data, (list, dict)):
-                return False, None, "JSON数据必须是列表或字典"
-            return True, data, "JSON结构有效"
-        except json.JSONDecodeError as e:
-            return False, None, f"JSON解析错误: 行 {e.lineno}, 列 {e.colno} - {e.msg}"
-        except Exception as e:
-            return False, None, f"验证JSON失败: {str(e)}"
-
-
-class VirusSignature:
-    """病毒特征类，增强容错能力"""
-    def __init__(self, signature_id: str, name: str, description: str,
-                 file_names: List[str], file_hashes: List[str], file_sizes: List[int],
-                 registry_paths: List[str], process_names: List[str],
-                 network_indicators: List[str], file_paths: List[str],
-                 creation_date: datetime.datetime, is_active: bool = True,
-                 threat_level: int = 3):
-        # 强制类型转换，防止类型错误
-        self.signature_id = str(signature_id).strip()
-        self.name = str(name).strip() or "未命名特征"
-        self.description = str(description).strip() or "无描述"
-        self.file_names = self._safe_list_convert(file_names, str)
-        self.file_hashes = self._safe_list_convert(file_hashes, str)
-        self.file_sizes = self._safe_list_convert(file_sizes, int)
-        self.registry_paths = self._safe_list_convert(registry_paths, str)
-        self.process_names = self._safe_list_convert(process_names, str)
-        self.network_indicators = self._safe_list_convert(network_indicators, str)
-        self.file_paths = self._safe_list_convert(file_paths, str)
-        self.creation_date = self._safe_datetime_convert(creation_date)
-        self.is_active = self._safe_bool_convert(is_active)
-        self.threat_level = max(1, min(5, self._safe_int_convert(threat_level, 3)))
-
-    @staticmethod
-    def _safe_list_convert(value, target_type) -> List:
-        """安全转换为列表并确保元素类型正确"""
-        if value is None:
-            return []
-        if not isinstance(value, list):
-            value = [value]
-        
-        result = []
-        for item in value:
-            try:
-                if target_type == int and isinstance(item, str):
-                    # 特殊处理字符串转整数
-                    item = item.replace(',', '').strip()
-                    result.append(target_type(float(item)))
-                else:
-                    result.append(target_type(item))
-            except:
-                continue
-        return result
-
-    @staticmethod
-    def _safe_datetime_convert(value) -> datetime.datetime:
-        """安全转换为datetime对象"""
-        if isinstance(value, datetime.datetime):
-            return value
-            
-        date_str = str(value).strip() if value is not None else ""
-        date_formats = [
-            "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
-            "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
-            "%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y",
-            "%Y年%m月%d日", "%Y年%m月%d日 %H:%M:%S",
-            "%d-%m-%Y", "%d/%m/%Y"
-        ]
-        
-        for fmt in date_formats:
-            try:
-                return datetime.datetime.strptime(date_str, fmt)
-            except:
-                continue
-                
-        try:
-            return datetime.datetime.fromisoformat(date_str)
-        except:
-            return datetime.datetime.now()
-
-    @staticmethod
-    def _safe_bool_convert(value) -> bool:
-        """安全转换为布尔值"""
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.lower() in ["true", "1", "yes", "active", "on"]
-        if isinstance(value, int):
-            return value != 0
-        return True
-
-    @staticmethod
-    def _safe_int_convert(value, default: int) -> int:
-        """安全转换为整数"""
-        try:
-            return int(float(str(value).strip()))
-        except:
-            return default
-
-if not os.path.exists(SIGNATURES_DIR):
-    os.makedirs(SIGNATURES_DIR, exist_ok=True)
-
-class ImportDiagnostic:
-    """导入诊断工具，专注解决JSON解析错误处理"""
-    @staticmethod
-    def check_file_access(file_path: str) -> Tuple[bool, str]:
-        # 保持有代码保持不变
-        if not file_path:
-            return False, "未提供文件路径"
-            
-        if not os.path.exists(file_path):
-            return False, f"文件不存在: {file_path}"
-            
-        if not os.path.isfile(file_path):
-            return False, f"不是有效文件: {file_path}"
-            
-        if not os.access(file_path, os.R_OK):
-            return False, f"没有读取权限: {file_path}"
-            
-        if os.path.getsize(file_path) == 0:
-            return False, f"文件为空: {file_path}"
-            
-        return True, "文件检查通过"
-
-    @staticmethod
-    def detect_file_encoding(file_path: str) -> Tuple[str, float]:
-        # 原有代码保持不变
-        try:
-            with open(file_path, 'rb') as f:
-                raw_data = f.read(4096)
-                result = chardet.detect(raw_data)
-                return result.get('encoding', 'utf-8'), result.get('confidence', 0.0)
-        except Exception as e:
-            return 'utf-8', 0.0
-
-    @staticmethod
-    def validate_json_structure(content: str) -> Tuple[bool, Any, str]:
-        """验证JSON结构，特别处理Extra data错误"""
-        try:
-            # 尝试标准解析
-            data = json.loads(content)
-            if not isinstance(data, (list, dict)):
-                return False, None, "JSON数据必须是列表或字典"
-            return True, data, "JSON结构有效"
-            
-        except json.JSONDecodeError as e:
-            # 检测到Extra data错误（最常见的多JSON对象错误）
-            if "Extra data" in str(e):
-                # 尝试修复：分割JSON对象并取第一个有效部分
-                try:
-                    # 在错误位置截断
-                    truncated_content = content[:e.pos]
-                    data = json.loads(truncated_content)
-                    return True, data, f"JSON修复成功: 移除了位置 {e.pos} 后的额外数据"
-                except:
-                    # 尝试用正则表达式分割多个JSON对象
-                    import re
-                    json_objects = re.findall(r'\{.*?\}', truncated_content, re.DOTALL)
-                    if json_objects:
-                        try:
-                            data = json.loads(json_objects[0])
-                            return True, data, f"JSON修复成功: 提取了第一个有效JSON对象"
-                        except:
-                            pass
-                return False, None, f"JSON解析错误: 存在多个JSON对象 - 行 {e.lineno}, 列 {e.colno}"
-            
-            return False, None, f"JSON解析错误: 行 {e.lineno}, 列 {e.colno} - {e.msg}"
-        except Exception as e:
-            return False, None, f"验证JSON失败: {str(e)}"
-
-
-class VirusSignature:
-    """病毒特征类，保持原有实现"""
-    def __init__(self, signature_id: str, name: str, description: str,
-                 file_names: List[str], file_hashes: List[str], file_sizes: List[int],
-                 registry_paths: List[str], process_names: List[str],
-                 network_indicators: List[str], file_paths: List[str],
-                 creation_date: datetime.datetime, is_active: bool = True,
-                 threat_level: int = 3):
-        self.signature_id = str(signature_id).strip()
-        self.name = str(name).strip() or "未命名特征"
-        self.description = str(description).strip() or "无描述"
-        self.file_names = self._safe_list_convert(file_names, str)
-        self.file_hashes = self._safe_list_convert(file_hashes, str)
-        self.file_sizes = self._safe_list_convert(file_sizes, int)
-        self.registry_paths = self._safe_list_convert(registry_paths, str)
-        self.process_names = self._safe_list_convert(process_names, str)
-        self.network_indicators = self._safe_list_convert(network_indicators, str)
-        self.file_paths = self._safe_list_convert(file_paths, str)
-        self.creation_date = self._safe_datetime_convert(creation_date)
-        self.is_active = self._safe_bool_convert(is_active)
-        self.threat_level = max(1, min(5, self._safe_int_convert(threat_level, 3)))
-
-    @staticmethod
-    def _safe_list_convert(value, target_type) -> List:
-        if value is None:
-            return []
-        if not isinstance(value, list):
-            value = [value]
-        
-        result = []
-        for item in value:
-            try:
-                if target_type == int and isinstance(item, str):
-                    item = item.replace(',', '').strip()
-                    result.append(target_type(float(item)))
-                else:
-                    result.append(target_type(item))
-            except:
-                continue
-        return result
-
-    @staticmethod
-    def _safe_datetime_convert(value) -> datetime.datetime:
-        if isinstance(value, datetime.datetime):
-            return value
-            
-        date_str = str(value).strip() if value is not None else ""
-        date_formats = [
-            "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
-            "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
-            "%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y",
-            "%Y年%m月%d日", "%Y年%m月%d日 %H:%M:%S",
-            "%d-%m-%Y", "%d/%m/%Y"
-        ]
-        
-        for fmt in date_formats:
-            try:
-                return datetime.datetime.strptime(date_str, fmt)
-            except:
-                continue
-                
-        try:
-            return datetime.datetime.fromisoformat(date_str)
-        except:
-            return datetime.datetime.now()
-
-    @staticmethod
-    def _safe_bool_convert(value) -> bool:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.lower() in ["true", "1", "yes", "active", "on"]
-        if isinstance(value, int):
-            return value != 0
-        return True
-
-    @staticmethod
-    def _safe_int_convert(value, default: int) -> int:
-        try:
-            return int(float(str(value).strip()))
-        except:
-            return default
-
-
-SIGNATURES_DIR = "virus_signatures"
-if not os.path.exists(SIGNATURES_DIR):
-    os.makedirs(SIGNATURES_DIR, exist_ok=True)
-
-class ImportDiagnostic:
-    """导入诊断工具，专注解决JSON解析错误处理"""
-    @staticmethod
-    def check_file_access(file_path: str) -> Tuple[bool, str]:
-        # 保持有代码保持不变
-        if not file_path:
-            return False, "未提供文件路径"
-            
-        if not os.path.exists(file_path):
-            return False, f"文件不存在: {file_path}"
-            
-        if not os.path.isfile(file_path):
-            return False, f"不是有效文件: {file_path}"
-            
-        if not os.access(file_path, os.R_OK):
-            return False, f"没有读取权限: {file_path}"
-            
-        if os.path.getsize(file_path) == 0:
-            return False, f"文件为空: {file_path}"
-            
-        return True, "文件检查通过"
-
-    @staticmethod
-    def detect_file_encoding(file_path: str) -> Tuple[str, float]:
-        # 原有代码保持不变
-        try:
-            with open(file_path, 'rb') as f:
-                raw_data = f.read(4096)
-                result = chardet.detect(raw_data)
-                return result.get('encoding', 'utf-8'), result.get('confidence', 0.0)
-        except Exception as e:
-            return 'utf-8', 0.0
-
-    @staticmethod
-    def validate_json_structure(content: str) -> Tuple[bool, Any, str]:
-        """验证JSON结构，特别处理Extra data错误"""
-        try:
-            # 尝试标准解析
-            data = json.loads(content)
-            if not isinstance(data, (list, dict)):
-                return False, None, "JSON数据必须是列表或字典"
-            return True, data, "JSON结构有效"
-            
-        except json.JSONDecodeError as e:
-            # 检测到Extra data错误（最常见的多JSON对象错误）
-            if "Extra data" in str(e):
-                # 尝试修复：分割JSON对象并取第一个有效部分
-                try:
-                    # 在错误位置截断
-                    truncated_content = content[:e.pos]
-                    data = json.loads(truncated_content)
-                    return True, data, f"JSON修复成功: 移除了位置 {e.pos} 后的额外数据"
-                except:
-                    # 尝试用正则表达式分割多个JSON对象
-                    import re
-                    json_objects = re.findall(r'\{.*?\}', truncated_content, re.DOTALL)
-                    if json_objects:
-                        try:
-                            data = json.loads(json_objects[0])
-                            return True, data, f"JSON修复成功: 提取了第一个有效JSON对象"
-                        except:
-                            pass
-                return False, None, f"JSON解析错误: 存在多个JSON对象 - 行 {e.lineno}, 列 {e.colno}"
-            
-            return False, None, f"JSON解析错误: 行 {e.lineno}, 列 {e.colno} - {e.msg}"
-        except Exception as e:
-            return False, None, f"验证JSON失败: {str(e)}"
-
-
-class VirusSignature:
-    """病毒特征类，保持原有实现"""
-    def __init__(self, signature_id: str, name: str, description: str,
-                 file_names: List[str], file_hashes: List[str], file_sizes: List[int],
-                 registry_paths: List[str], process_names: List[str],
-                 network_indicators: List[str], file_paths: List[str],
-                 creation_date: datetime.datetime, is_active: bool = True,
-                 threat_level: int = 3):
-        self.signature_id = str(signature_id).strip()
-        self.name = str(name).strip() or "未命名特征"
-        self.description = str(description).strip() or "无描述"
-        self.file_names = self._safe_list_convert(file_names, str)
-        self.file_hashes = self._safe_list_convert(file_hashes, str)
-        self.file_sizes = self._safe_list_convert(file_sizes, int)
-        self.registry_paths = self._safe_list_convert(registry_paths, str)
-        self.process_names = self._safe_list_convert(process_names, str)
-        self.network_indicators = self._safe_list_convert(network_indicators, str)
-        self.file_paths = self._safe_list_convert(file_paths, str)
-        self.creation_date = self._safe_datetime_convert(creation_date)
-        self.is_active = self._safe_bool_convert(is_active)
-        self.threat_level = max(1, min(5, self._safe_int_convert(threat_level, 3)))
-
-    @staticmethod
-    def _safe_list_convert(value, target_type) -> List:
-        if value is None:
-            return []
-        if not isinstance(value, list):
-            value = [value]
-        
-        result = []
-        for item in value:
-            try:
-                if target_type == int and isinstance(item, str):
-                    item = item.replace(',', '').strip()
-                    result.append(target_type(float(item)))
-                else:
-                    result.append(target_type(item))
-            except:
-                continue
-        return result
-
-    @staticmethod
-    def _safe_datetime_convert(value) -> datetime.datetime:
-        if isinstance(value, datetime.datetime):
-            return value
-            
-        date_str = str(value).strip() if value is not None else ""
-        date_formats = [
-            "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
-            "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
-            "%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y",
-            "%Y年%m月%d日", "%Y年%m月%d日 %H:%M:%S",
-            "%d-%m-%Y", "%d/%m/%Y"
-        ]
-        
-        for fmt in date_formats:
-            try:
-                return datetime.datetime.strptime(date_str, fmt)
-            except:
-                continue
-                
-        try:
-            return datetime.datetime.fromisoformat(date_str)
-        except:
-            return datetime.datetime.now()
-
-    @staticmethod
-    def _safe_bool_convert(value) -> bool:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.lower() in ["true", "1", "yes", "active", "on"]
-        if isinstance(value, int):
-            return value != 0
-        return True
-
-    @staticmethod
-    def _safe_int_convert(value, default: int) -> int:
-        try:
-            return int(float(str(value).strip()))
-        except:
-            return default
-
-
+# -------------------------- 病毒特征管理模块 --------------------------
 class SignatureManager:
     """病毒特征管理工具，重点修复JSON解析错误"""
     
@@ -1684,7 +1206,8 @@ class SignatureManager:
             return file_path
         except Exception as e:
             self._log(f"导出失败: {str(e)}", "ERROR")
-            return ""nonlocal
+            return "" 
+
 # -------------------------- 核心扫描器类 --------------------------
 class PirsrcScanner:
     """pirsrc_scan 核心扫描器"""
@@ -1698,8 +1221,6 @@ class PirsrcScanner:
             name: ThreatIntelClient(cfg) 
             for name, cfg in THREAT_INTEL_CONFIG.items()
         }
-        self.result_exporter = ScanResultExporter(self)
-        self.signature_manager = SignatureManager(self)
         
         # 数据存储
         self.signatures = DEFAULT_SIGNATURES.copy()
@@ -1810,11 +1331,71 @@ class PirsrcScanner:
     
     def save_signatures(self, file_path: str) -> bool:
         """保存病毒特征到文件"""
-        return self.signature_manager.export_signatures(file_path)
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                # 转换为可序列化的字典
+                sig_list = []
+                for sig in self.signatures:
+                    sig_dict = {
+                        "signature_id": sig.signature_id,
+                        "name": sig.name,
+                        "description": sig.description,
+                        "file_names": sig.file_names,
+                        "file_hashes": sig.file_hashes,
+                        "file_sizes": sig.file_sizes,
+                        "registry_paths": sig.registry_paths,
+                        "process_names": sig.process_names,
+                        "network_indicators": sig.network_indicators,
+                        "file_paths": sig.file_paths,
+                        "creation_date": sig.creation_date.isoformat(),
+                        "is_active": sig.is_active,
+                        "threat_level": sig.threat_level
+                    }
+                    sig_list.append(sig_dict)
+                json.dump(sig_list, f, ensure_ascii=False, indent=2)
+            self.log(f"病毒特征已保存到: {file_path}")
+            return True
+        except Exception as e:
+            self.log(f"保存病毒特征失败: {str(e)}", "ERROR")
+            return False
     
     def load_signatures(self, file_path: str) -> bool:
         """从文件加载病毒特征"""
-        return self.signature_manager.import_signatures(file_path)
+        try:
+            if not os.path.exists(file_path):
+                self.log(f"病毒特征文件不存在: {file_path}", "ERROR")
+                return False
+                
+            with open(file_path, "r", encoding="utf-8") as f:
+                sig_list = json.load(f)
+                
+            self.signatures = []
+            for sig_dict in sig_list:
+                try:
+                    signature = VirusSignature(
+                        signature_id=sig_dict["signature_id"],
+                        name=sig_dict["name"],
+                        description=sig_dict["description"],
+                        file_names=sig_dict["file_names"],
+                        file_hashes=sig_dict["file_hashes"],
+                        file_sizes=sig_dict["file_sizes"],
+                        registry_paths=sig_dict["registry_paths"],
+                        process_names=sig_dict["process_names"],
+                        network_indicators=sig_dict["network_indicators"],
+                        file_paths=sig_dict.get("file_paths", []),
+                        creation_date=datetime.datetime.fromisoformat(sig_dict["creation_date"]),
+                        is_active=sig_dict["is_active"],
+                        threat_level=sig_dict.get("threat_level", 3)
+                    )
+                    self.signatures.append(signature)
+                except Exception as e:
+                    self.log(f"解析病毒特征失败: {str(e)}", "ERROR")
+            
+            self.log(f"已从{file_path}加载{len(self.signatures)}个病毒特征")
+            return True
+        except Exception as e:
+            self.log(f"加载病毒特征失败: {str(e)}", "ERROR")
+            return False
     
     def calculate_file_hash(self, file_path: str) -> str:
         """计算文件SHA256哈希"""
@@ -1844,10 +1425,6 @@ class PirsrcScanner:
     def get_running_processes(self) -> List[Dict]:
         """获取当前运行的进程，包含资源占用信息"""
         processes = []
-        if not psutil:
-            self.log("psutil库未安装，无法获取进程信息", "WARNING")
-            return processes
-            
         try:
             for proc in psutil.process_iter(['pid', 'name', 'exe', 'cpu_percent', 'memory_percent']):
                 try:
@@ -1891,10 +1468,6 @@ class PirsrcScanner:
     def check_network_connections(self) -> List[Dict]:
         """检查网络连接，检测跨境连接"""
         connections = []
-        if not psutil:
-            self.log("psutil库未安装，无法获取网络连接信息", "WARNING")
-            return connections
-            
         try:
             # 获取网络连接
             for conn in psutil.net_connections(kind='tcp'):
@@ -1974,139 +1547,100 @@ class PirsrcScanner:
         return connections
     
     def scan_file(self, file_path: str, deep_scan: bool = False) -> Dict:
-        """扫描单个文件，确保错误结果也包含必要信息"""
-        # 初始化基础结果字典
+        """扫描单个文件"""
+        if not os.path.exists(file_path) or not os.path.isfile(file_path):
+            return {"status": "error", "message": f"文件不存在: {file_path}"}
+            
         result = {
             "file_path": file_path,
             "file_name": os.path.basename(file_path),
-            "status": "success",
-            "error_message": "",
+            "file_size": os.path.getsize(file_path),
+            "file_type": self.file_identifier.get_file_type(file_path),
+            "file_hash": self.calculate_file_hash(file_path),
+            "is_malicious": False,
+            "matched_signatures": [],
+            "threat_intel_reports": [],
+            "signature_verification": {"valid": False, "message": ""},
+            "integrity_check": {"valid": False, "message": ""},
+            "sandbox_analysis": None,
+            "timestamp": datetime.datetime.now()
         }
         
-        # 检查文件是否存在
-        if not os.path.exists(file_path) or not os.path.isfile(file_path):
-            result["status"] = "error"
-            result["error_message"] = f"文件不存在: {file_path}"
-            self.scan_results.append(result)
-            # 确保单个文件扫描结果也导出到CSV
-            self.result_exporter.export_to_csv([result])
-            return result
+        # 验证文件签名
+        sig_valid, sig_msg = self.signature_verifier.verify_file_signature(file_path)
+        result["signature_verification"] = {
+            "valid": sig_valid,
+            "message": sig_msg
+        }
         
-        # 完善结果字典的其他字段
-        try:
-            result.update({
-                "file_size": os.path.getsize(file_path),
-                "file_type": self.file_identifier.get_file_type(file_path),
-                "file_hash": self.calculate_file_hash(file_path),
-                "is_malicious": False,
-                "matched_signatures": [],
-                "threat_intel_reports": [],
-                "signature_verification": {"valid": False, "message": ""},
-                "integrity_check": {"valid": False, "message": ""},
-                "sandbox_analysis": None,
-                "timestamp": datetime.datetime.now()
-            })
-            
-            # 验证文件签名
-            sig_valid, sig_msg = self.signature_verifier.verify_file_signature(file_path)
-            result["signature_verification"] = {
-                "valid": sig_valid,
-                "message": sig_msg
-            }
-            
-            # 检查文件完整性
-            int_valid, int_msg = self.signature_verifier.check_file_integrity(file_path)
-            result["integrity_check"] = {
-                "valid": int_valid,
-                "message": int_msg
-            }
-            
-            # 检查文件是否匹配病毒特征
-            for sig in self.signatures:
-                if not sig.is_active:
-                    continue
-                    
-                matches = []
-                # 检查文件名
-                if result["file_name"].lower() in [n.lower() for n in sig.file_names]:
-                    matches.append(f"文件名匹配: {result['file_name']}")
+        # 检查文件完整性
+        int_valid, int_msg = self.signature_verifier.check_file_integrity(file_path)
+        result["integrity_check"] = {
+            "valid": int_valid,
+            "message": int_msg
+        }
+        
+        # 检查文件是否匹配病毒特征
+        for sig in self.signatures:
+            if not sig.is_active:
+                continue
                 
-                # 检查文件大小
-                if result["file_size"] in sig.file_sizes:
-                    matches.append(f"文件大小匹配: {result['file_size']} bytes")
-                    
-                # 检查文件哈希
-                if result["file_hash"] and result["file_hash"] in sig.file_hashes:
-                    matches.append(f"文件哈希匹配: {result['file_hash']}")
+            matches = []
+            # 检查文件名
+            if result["file_name"].lower() in [n.lower() for n in sig.file_names]:
+                matches.append(f"文件名匹配: {result['file_name']}")
+            
+            # 检查文件大小
+            if result["file_size"] in sig.file_sizes:
+                matches.append(f"文件大小匹配: {result['file_size']} bytes")
+                
+            # 检查文件哈希
+            if result["file_hash"] and result["file_hash"] in sig.file_hashes:
+                matches.append(f"文件哈希匹配: {result['file_hash']}")
+                result["is_malicious"] = True
+                
+            # 检查文件路径
+            for path_pattern in sig.file_paths:
+                if re.match(path_pattern.replace("\\", "\\\\").replace("*", ".*"), file_path, re.IGNORECASE):
+                    matches.append(f"文件路径匹配: {file_path}")
                     result["is_malicious"] = True
-                    
-                # 检查文件路径
-                for path_pattern in sig.file_paths:
-                    if re.match(path_pattern.replace("\\", "\\\\").replace("*", ".*"), file_path, re.IGNORECASE):
-                        matches.append(f"文件路径匹配: {file_path}")
-                        result["is_malicious"] = True
-                    
-                if matches:
-                    result["matched_signatures"].append({
-                        "signature_id": sig.signature_id,
-                        "name": sig.name,
-                        "description": sig.description,
-                        "matches": matches,
-                        "threat_level": sig.threat_level
-                    })
+                
+            if matches:
+                result["matched_signatures"].append({
+                    "signature_id": sig.signature_id,
+                    "name": sig.name,
+                    "description": sig.description,
+                    "matches": matches,
+                    "threat_level": sig.threat_level
+                })
+                result["is_malicious"] = True
+        
+        # 如果是恶意文件或深度扫描，进行沙盒分析
+        if result["is_malicious"] or deep_scan:
+            result["sandbox_analysis"] = self.sandbox_analyzer.run_sandbox_analysis(file_path)
+            if result["sandbox_analysis"]["verdict"] == "malicious":
+                result["is_malicious"] = True
+        
+        # 查询威胁情报中心
+        if result["file_hash"]:
+            for client in self.intel_clients.values():
+                report = client.get_file_report(result["file_hash"])
+                result["threat_intel_reports"].append(report)
+                
+                # 如果任何情报中心标记为恶意，则标记为恶意
+                if report.get("status") == "success" and report.get("positives", 0) > 0:
                     result["is_malicious"] = True
-            
-            # 如果是恶意文件或深度扫描，进行沙盒分析
-            if result["is_malicious"] or deep_scan:
-                result["sandbox_analysis"] = self.sandbox_analyzer.run_sandbox_analysis(file_path)
-                if result["sandbox_analysis"]["verdict"] == "malicious":
-                    result["is_malicious"] = True
-            
-            # 查询威胁情报中心
-            if result["file_hash"]:
-                for client in self.intel_clients.values():
-                    report = client.get_file_report(result["file_hash"])
-                    result["threat_intel_reports"].append(report)
-                    
-                    # 如果任何情报中心标记为恶意，则标记为恶意
-                    if report.get("status") == "success" and report.get("positives", 0) > 0:
-                        result["is_malicious"] = True
-            
-            self.scan_results.append(result)
-            status = "恶意" if result["is_malicious"] else "正常"
-            self.log(f"文件扫描完成: {result['file_name']} - 状态: {status}")
-            
-            # 确保单个文件扫描结果也导出到CSV
-            self.result_exporter.export_to_csv([result])
-            return result
-            
-        except Exception as e:
-            # 处理扫描过程中的异常
-            result["status"] = "error"
-            result["error_message"] = f"扫描过程中出错: {str(e)}"
-            self.scan_results.append(result)
-            # 异常情况也导出结果
-            self.result_exporter.export_to_csv([result])
-            self.log(f"文件扫描出错: {result['file_name']} - 错误: {str(e)}", "ERROR")
-            return result
-
+        
+        self.scan_results.append(result)
+        status = "恶意" if result["is_malicious"] else "正常"
+        self.log(f"文件扫描完成: {result['file_name']} - 状态: {status}")
+        return result
+    
     def scan_directory(self, dir_path: str, deep_scan: bool = False) -> List[Dict]:
         """扫描目录中的所有文件"""
         if not os.path.exists(dir_path) or not os.path.isdir(dir_path):
-            error_msg = f"目录不存在或不是有效的目录: {dir_path}"
-            self.log(error_msg, "ERROR")
-            # 记录错误结果
-            error_result = {
-                "file_path": dir_path,
-                "file_name": os.path.basename(dir_path),
-                "status": "error",
-                "error_message": error_msg,
-                "timestamp": datetime.datetime.now()
-            }
-            self.scan_results.append(error_result)
-            # 导出错误结果
-            self.result_exporter.export_to_csv([error_result])
-            return self.scan_results
+            self.log(f"目录不存在: {dir_path}", "ERROR")
+            return []
             
         results = []
         self.log(f"开始扫描目录: {dir_path}")
@@ -2124,43 +1658,30 @@ class PirsrcScanner:
                     results.append(result)
                 except Exception as e:
                     self.log(f"扫描文件{file_path}失败: {str(e)}", "ERROR")
-                    # 记录单个文件扫描错误
-                    error_result = {
-                        "file_path": file_path,
-                        "file_name": file,
-                        "status": "error",
-                        "error_message": str(e),
-                        "timestamp": datetime.datetime.now()
-                    }
-                    results.append(error_result)
-                    self.scan_results.append(error_result)
         
         self.log(f"目录扫描完成: {dir_path}，共扫描{len(results)}个文件")
-        # 确保所有结果都导出到CSV
-        csv_path = self.result_exporter.export_to_csv(results)
-        self.log(f"扫描结果已保存至CSV: {csv_path}", "INFO")
         return results
     
     def extract_samples(self, quarantine: bool = True) -> List[str]:
         """提取可疑样本并保存到samples目录"""
         samples = []
         for result in self.scan_results:
-            if result.get("is_malicious", False):
+            if result["is_malicious"]:
                 try:
                     # 构建样本文件名: 哈希_原文件名
-                    sample_name = f"{result.get('file_hash', '')[:8]}_{result.get('file_name', '')}"
+                    sample_name = f"{result['file_hash'][:8]}_{result['file_name']}"
                     sample_path = os.path.join(SAMPLES_DIR, sample_name)
                     
                     # 复制文件
-                    shutil.copy2(result.get("file_path", ""), sample_path)
+                    shutil.copy2(result["file_path"], sample_path)
                     samples.append(sample_path)
                     self.log(f"已提取样本: {sample_path}")
                     
                     # 如果需要隔离，移动到隔离区
-                    if quarantine and result.get("file_path", "") != sample_path:
-                        self.quarantine_file(result.get("file_path", ""))
+                    if quarantine and result["file_path"] != sample_path:
+                        self.quarantine_file(result["file_path"])
                 except Exception as e:
-                    self.log(f"提取样本{result.get('file_path', '')}失败: {str(e)}", "ERROR")
+                    self.log(f"提取样本{result['file_path']}失败: {str(e)}", "ERROR")
         
         # 打包样本
         if samples:
@@ -2215,8 +1736,8 @@ class PirsrcScanner:
     def restore_file(self, quarantine_entry: Dict) -> Tuple[bool, str]:
         """从隔离区恢复文件"""
         try:
-            quarantine_path = quarantine_entry.get("quarantine_path", "")
-            original_path = quarantine_entry.get("original_path", "")
+            quarantine_path = quarantine_entry["quarantine_path"]
+            original_path = quarantine_entry["original_path"]
             
             if not os.path.exists(quarantine_path):
                 return False, "隔离文件不存在"
@@ -2237,7 +1758,7 @@ class PirsrcScanner:
                 log_data = json.load(f)
             
             for entry in log_data:
-                if entry.get("quarantine_path", "") == quarantine_path:
+                if entry["quarantine_path"] == quarantine_path:
                     entry["status"] = "restored"
                     entry["restored_path"] = original_path
                     entry["restore_timestamp"] = datetime.datetime.now().isoformat()
@@ -2361,7 +1882,7 @@ class PirsrcScanner:
             "end_time": end_time,
             "duration": duration,
             "total_files_scanned": len(dir_results),
-            "malicious_files_found": len([r for r in dir_results if r.get("is_malicious", False)]),
+            "malicious_files_found": len([r for r in dir_results if r["is_malicious"]]),
             "malicious_processes_found": len(malicious_processes),
             "high_resource_processes": len(high_resource_processes),
             "cross_border_connections_found": len(self.cross_border_connections)
@@ -2381,7 +1902,7 @@ class PirsrcScanner:
             with open(report_path, "w", encoding="utf-8") as f:
                 report_data = {
                     "summary": summary,
-                    "malicious_files": [r for r in dir_results if r.get("is_malicious", False)],
+                    "malicious_files": [r for r in dir_results if r["is_malicious"]],
                     "malicious_processes": malicious_processes,
                     "high_resource_processes": high_resource_processes,
                     "cross_border_connections": self.cross_border_connections
@@ -2390,10 +1911,6 @@ class PirsrcScanner:
             self.log(f"全系统扫描报告已保存到: {report_path}")
         except Exception as e:
             self.log(f"保存扫描报告失败: {str(e)}", "ERROR")
-        
-        # 确保所有结果都导出到CSV
-        csv_path = self.result_exporter.export_to_csv(dir_results)
-        self.log(f"扫描结果已保存至CSV: {csv_path}", "INFO")
         
         return {
             "summary": summary,
@@ -3077,13 +2594,14 @@ class CliInterface:
                     if key == '1':
                         print(f"{Color.BOLD}开始执行系统扫描...{Color.RESET}")
                         # 执行扫描并获取结果
-                        scan_results = self.scanner.perform_scan()
+                        scan_results = self.scanner.full_system_scan()
                         # 扫描完成后显示结果和目录
                         self.handle_scan_complete(scan_results)
                     else:
                         self.handle_scan_tab(key)
                 elif self.current_tab == 1:
                     self.handle_network_tab(key)
+
                 elif self.current_tab == 2:
                     # 样本管理标签处理目录命令
                     if key == '5':
