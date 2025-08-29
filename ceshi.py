@@ -13,7 +13,6 @@ import time
 import hashlib
 import shutil
 import zipfile
-import random
 import datetime
 import subprocess
 import glob
@@ -1244,7 +1243,7 @@ class PirsrcScanner:
     
     def log(self, message: str, level: str = "INFO") -> str:
         """记录日志"""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_msg = f"[{timestamp}] [{level}] {message}"
         self.logs.append(log_msg)
         # 控制台输出带颜色
@@ -1261,7 +1260,7 @@ class PirsrcScanner:
             print(log_msg)
         
         # 写入日志文件
-        log_file = os.path.join(REPORTS_DIR, f"scan_log_{datetime.now().strftime('%Y%m%d')}.txt")
+        log_file = os.path.join(REPORTS_DIR, f"scan_log_{datetime.datetime.now().strftime('%Y%m%d')}.txt")
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(log_msg + "\n")
             
@@ -1921,7 +1920,6 @@ class PirsrcScanner:
             "high_resource_processes": high_resource_processes,
             "report_path": report_path
         }
-
 
 # -------------------------- 命令行界面类 --------------------------
 class CliInterface:
