@@ -19,6 +19,7 @@ import subprocess
 import glob
 from typing import List, Dict, Tuple, Optional, Any, Set
 import ipaddress
+import chardet
 
 # 尝试导入psutil库，如未安装则尝试自动安装
 try:
@@ -928,9 +929,485 @@ class ScanResultExporter:
             self.scanner.log(f"导出扫描结果失败: {str(e)}", "ERROR")
             return ""
 
-# -------------------------- 病毒特征管理模块 --------------------------
+class VirusSignature:
+    """病毒特征类，存储恶意软件的特征信息"""
+    def __init__(self, signature_id: str, name: str, description: str,
+                 file_names: List[str], file_hashes: List[str], file_sizes: List[int],
+                 registry_paths: List[str], process_names: List[str],
+                 network_indicators: List[str], file_paths: List[str],
+                 creation_date: datetime.datetime, is_active: bool = True,
+                 threat_level: int = 3):
+        self.signature_id = signature_id
+        self.name = name
+        self.description = description
+        self.file_names = file_names
+        self.file_hashes = file_hashes
+        self.file_sizes = file_sizes
+        self.registry_paths = registry_paths
+        self.process_names = process_names
+        self.network_indicators = network_indicators
+        self.file_paths = file_paths
+        self.creation_date = creation_date
+        self.is_active = is_active
+        self.threat_level = max(1, min(5, threat_level))  # 确保威胁级别在1-5之间
+
+
+# 确保常量定义
+SIGNATURES_DIR = "virus_signatures"
+if not os.path.exists(SIGNATURES_DIR):
+    os.makedirs(SIGNATURES_DIR, exist_ok=True)
+
+class ImportDiagnostic:
+    """导入诊断诊断工具，帮助定位导入失败原因"""
+    @staticmethod
+    def check_file_access(file_path: str) -> Tuple[bool, str]:
+        """检查文件访问性"""
+        if not file_path:
+            return False, "未提供文件路径"
+            
+        if not os.path.exists(file_path):
+            return False, f"文件不存在: {file_path}"
+            
+        if not os.path.isfile(file_path):
+            return False, f"不是有效文件: {file_path}"
+            
+        if not os.access(file_path, os.R_OK):
+            return False, f"没有读取权限: {file_path}"
+            
+        if os.path.getsize(file_path) == 0:
+            return False, f"文件为空: {file_path}"
+            
+        return True, "文件检查通过"
+
+    @staticmethod
+    def detect_file_encoding(file_path: str) -> Tuple[str, float]:
+        """检测文件编码"""
+        try:
+            with open(file_path, 'rb') as f:
+                raw_data = f.read(4096)
+                result = chardet.detect(raw_data)
+                return result.get('encoding', 'utf-8'), result.get('confidence', 0.0)
+        except Exception as e:
+            return 'utf-8', 0.0
+
+    @staticmethod
+    def validate_json_structure(content: str) -> Tuple[bool, Any, str]:
+        """验证JSON结构"""
+        try:
+            data = json.loads(content)
+            if not isinstance(data, (list, dict)):
+                return False, None, "JSON数据必须是列表或字典"
+            return True, data, "JSON结构有效"
+        except json.JSONDecodeError as e:
+            return False, None, f"JSON解析错误: 行 {e.lineno}, 列 {e.colno} - {e.msg}"
+        except Exception as e:
+            return False, None, f"验证JSON失败: {str(e)}"
+
+
+class VirusSignature:
+    """病毒特征类，增强容错能力"""
+    def __init__(self, signature_id: str, name: str, description: str,
+                 file_names: List[str], file_hashes: List[str], file_sizes: List[int],
+                 registry_paths: List[str], process_names: List[str],
+                 network_indicators: List[str], file_paths: List[str],
+                 creation_date: datetime.datetime, is_active: bool = True,
+                 threat_level: int = 3):
+        # 强制类型转换，防止类型错误
+        self.signature_id = str(signature_id).strip()
+        self.name = str(name).strip() or "未命名特征"
+        self.description = str(description).strip() or "无描述"
+        self.file_names = self._safe_list_convert(file_names, str)
+        self.file_hashes = self._safe_list_convert(file_hashes, str)
+        self.file_sizes = self._safe_list_convert(file_sizes, int)
+        self.registry_paths = self._safe_list_convert(registry_paths, str)
+        self.process_names = self._safe_list_convert(process_names, str)
+        self.network_indicators = self._safe_list_convert(network_indicators, str)
+        self.file_paths = self._safe_list_convert(file_paths, str)
+        self.creation_date = self._safe_datetime_convert(creation_date)
+        self.is_active = self._safe_bool_convert(is_active)
+        self.threat_level = max(1, min(5, self._safe_int_convert(threat_level, 3)))
+
+    @staticmethod
+    def _safe_list_convert(value, target_type) -> List:
+        """安全转换为列表并确保元素类型正确"""
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            value = [value]
+        
+        result = []
+        for item in value:
+            try:
+                if target_type == int and isinstance(item, str):
+                    # 特殊处理字符串转整数
+                    item = item.replace(',', '').strip()
+                    result.append(target_type(float(item)))
+                else:
+                    result.append(target_type(item))
+            except:
+                continue
+        return result
+
+    @staticmethod
+    def _safe_datetime_convert(value) -> datetime.datetime:
+        """安全转换为datetime对象"""
+        if isinstance(value, datetime.datetime):
+            return value
+            
+        date_str = str(value).strip() if value is not None else ""
+        date_formats = [
+            "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
+            "%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y",
+            "%Y年%m月%d日", "%Y年%m月%d日 %H:%M:%S",
+            "%d-%m-%Y", "%d/%m/%Y"
+        ]
+        
+        for fmt in date_formats:
+            try:
+                return datetime.datetime.strptime(date_str, fmt)
+            except:
+                continue
+                
+        try:
+            return datetime.datetime.fromisoformat(date_str)
+        except:
+            return datetime.datetime.now()
+
+    @staticmethod
+    def _safe_bool_convert(value) -> bool:
+        """安全转换为布尔值"""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ["true", "1", "yes", "active", "on"]
+        if isinstance(value, int):
+            return value != 0
+        return True
+
+    @staticmethod
+    def _safe_int_convert(value, default: int) -> int:
+        """安全转换为整数"""
+        try:
+            return int(float(str(value).strip()))
+        except:
+            return default
+
+if not os.path.exists(SIGNATURES_DIR):
+    os.makedirs(SIGNATURES_DIR, exist_ok=True)
+
+class ImportDiagnostic:
+    """导入诊断工具，专注解决JSON解析错误处理"""
+    @staticmethod
+    def check_file_access(file_path: str) -> Tuple[bool, str]:
+        # 保持有代码保持不变
+        if not file_path:
+            return False, "未提供文件路径"
+            
+        if not os.path.exists(file_path):
+            return False, f"文件不存在: {file_path}"
+            
+        if not os.path.isfile(file_path):
+            return False, f"不是有效文件: {file_path}"
+            
+        if not os.access(file_path, os.R_OK):
+            return False, f"没有读取权限: {file_path}"
+            
+        if os.path.getsize(file_path) == 0:
+            return False, f"文件为空: {file_path}"
+            
+        return True, "文件检查通过"
+
+    @staticmethod
+    def detect_file_encoding(file_path: str) -> Tuple[str, float]:
+        # 原有代码保持不变
+        try:
+            with open(file_path, 'rb') as f:
+                raw_data = f.read(4096)
+                result = chardet.detect(raw_data)
+                return result.get('encoding', 'utf-8'), result.get('confidence', 0.0)
+        except Exception as e:
+            return 'utf-8', 0.0
+
+    @staticmethod
+    def validate_json_structure(content: str) -> Tuple[bool, Any, str]:
+        """验证JSON结构，特别处理Extra data错误"""
+        try:
+            # 尝试标准解析
+            data = json.loads(content)
+            if not isinstance(data, (list, dict)):
+                return False, None, "JSON数据必须是列表或字典"
+            return True, data, "JSON结构有效"
+            
+        except json.JSONDecodeError as e:
+            # 检测到Extra data错误（最常见的多JSON对象错误）
+            if "Extra data" in str(e):
+                # 尝试修复：分割JSON对象并取第一个有效部分
+                try:
+                    # 在错误位置截断
+                    truncated_content = content[:e.pos]
+                    data = json.loads(truncated_content)
+                    return True, data, f"JSON修复成功: 移除了位置 {e.pos} 后的额外数据"
+                except:
+                    # 尝试用正则表达式分割多个JSON对象
+                    import re
+                    json_objects = re.findall(r'\{.*?\}', truncated_content, re.DOTALL)
+                    if json_objects:
+                        try:
+                            data = json.loads(json_objects[0])
+                            return True, data, f"JSON修复成功: 提取了第一个有效JSON对象"
+                        except:
+                            pass
+                return False, None, f"JSON解析错误: 存在多个JSON对象 - 行 {e.lineno}, 列 {e.colno}"
+            
+            return False, None, f"JSON解析错误: 行 {e.lineno}, 列 {e.colno} - {e.msg}"
+        except Exception as e:
+            return False, None, f"验证JSON失败: {str(e)}"
+
+
+class VirusSignature:
+    """病毒特征类，保持原有实现"""
+    def __init__(self, signature_id: str, name: str, description: str,
+                 file_names: List[str], file_hashes: List[str], file_sizes: List[int],
+                 registry_paths: List[str], process_names: List[str],
+                 network_indicators: List[str], file_paths: List[str],
+                 creation_date: datetime.datetime, is_active: bool = True,
+                 threat_level: int = 3):
+        self.signature_id = str(signature_id).strip()
+        self.name = str(name).strip() or "未命名特征"
+        self.description = str(description).strip() or "无描述"
+        self.file_names = self._safe_list_convert(file_names, str)
+        self.file_hashes = self._safe_list_convert(file_hashes, str)
+        self.file_sizes = self._safe_list_convert(file_sizes, int)
+        self.registry_paths = self._safe_list_convert(registry_paths, str)
+        self.process_names = self._safe_list_convert(process_names, str)
+        self.network_indicators = self._safe_list_convert(network_indicators, str)
+        self.file_paths = self._safe_list_convert(file_paths, str)
+        self.creation_date = self._safe_datetime_convert(creation_date)
+        self.is_active = self._safe_bool_convert(is_active)
+        self.threat_level = max(1, min(5, self._safe_int_convert(threat_level, 3)))
+
+    @staticmethod
+    def _safe_list_convert(value, target_type) -> List:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            value = [value]
+        
+        result = []
+        for item in value:
+            try:
+                if target_type == int and isinstance(item, str):
+                    item = item.replace(',', '').strip()
+                    result.append(target_type(float(item)))
+                else:
+                    result.append(target_type(item))
+            except:
+                continue
+        return result
+
+    @staticmethod
+    def _safe_datetime_convert(value) -> datetime.datetime:
+        if isinstance(value, datetime.datetime):
+            return value
+            
+        date_str = str(value).strip() if value is not None else ""
+        date_formats = [
+            "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
+            "%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y",
+            "%Y年%m月%d日", "%Y年%m月%d日 %H:%M:%S",
+            "%d-%m-%Y", "%d/%m/%Y"
+        ]
+        
+        for fmt in date_formats:
+            try:
+                return datetime.datetime.strptime(date_str, fmt)
+            except:
+                continue
+                
+        try:
+            return datetime.datetime.fromisoformat(date_str)
+        except:
+            return datetime.datetime.now()
+
+    @staticmethod
+    def _safe_bool_convert(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ["true", "1", "yes", "active", "on"]
+        if isinstance(value, int):
+            return value != 0
+        return True
+
+    @staticmethod
+    def _safe_int_convert(value, default: int) -> int:
+        try:
+            return int(float(str(value).strip()))
+        except:
+            return default
+
+
+SIGNATURES_DIR = "virus_signatures"
+if not os.path.exists(SIGNATURES_DIR):
+    os.makedirs(SIGNATURES_DIR, exist_ok=True)
+
+class ImportDiagnostic:
+    """导入诊断工具，专注解决JSON解析错误处理"""
+    @staticmethod
+    def check_file_access(file_path: str) -> Tuple[bool, str]:
+        # 保持有代码保持不变
+        if not file_path:
+            return False, "未提供文件路径"
+            
+        if not os.path.exists(file_path):
+            return False, f"文件不存在: {file_path}"
+            
+        if not os.path.isfile(file_path):
+            return False, f"不是有效文件: {file_path}"
+            
+        if not os.access(file_path, os.R_OK):
+            return False, f"没有读取权限: {file_path}"
+            
+        if os.path.getsize(file_path) == 0:
+            return False, f"文件为空: {file_path}"
+            
+        return True, "文件检查通过"
+
+    @staticmethod
+    def detect_file_encoding(file_path: str) -> Tuple[str, float]:
+        # 原有代码保持不变
+        try:
+            with open(file_path, 'rb') as f:
+                raw_data = f.read(4096)
+                result = chardet.detect(raw_data)
+                return result.get('encoding', 'utf-8'), result.get('confidence', 0.0)
+        except Exception as e:
+            return 'utf-8', 0.0
+
+    @staticmethod
+    def validate_json_structure(content: str) -> Tuple[bool, Any, str]:
+        """验证JSON结构，特别处理Extra data错误"""
+        try:
+            # 尝试标准解析
+            data = json.loads(content)
+            if not isinstance(data, (list, dict)):
+                return False, None, "JSON数据必须是列表或字典"
+            return True, data, "JSON结构有效"
+            
+        except json.JSONDecodeError as e:
+            # 检测到Extra data错误（最常见的多JSON对象错误）
+            if "Extra data" in str(e):
+                # 尝试修复：分割JSON对象并取第一个有效部分
+                try:
+                    # 在错误位置截断
+                    truncated_content = content[:e.pos]
+                    data = json.loads(truncated_content)
+                    return True, data, f"JSON修复成功: 移除了位置 {e.pos} 后的额外数据"
+                except:
+                    # 尝试用正则表达式分割多个JSON对象
+                    import re
+                    json_objects = re.findall(r'\{.*?\}', truncated_content, re.DOTALL)
+                    if json_objects:
+                        try:
+                            data = json.loads(json_objects[0])
+                            return True, data, f"JSON修复成功: 提取了第一个有效JSON对象"
+                        except:
+                            pass
+                return False, None, f"JSON解析错误: 存在多个JSON对象 - 行 {e.lineno}, 列 {e.colno}"
+            
+            return False, None, f"JSON解析错误: 行 {e.lineno}, 列 {e.colno} - {e.msg}"
+        except Exception as e:
+            return False, None, f"验证JSON失败: {str(e)}"
+
+
+class VirusSignature:
+    """病毒特征类，保持原有实现"""
+    def __init__(self, signature_id: str, name: str, description: str,
+                 file_names: List[str], file_hashes: List[str], file_sizes: List[int],
+                 registry_paths: List[str], process_names: List[str],
+                 network_indicators: List[str], file_paths: List[str],
+                 creation_date: datetime.datetime, is_active: bool = True,
+                 threat_level: int = 3):
+        self.signature_id = str(signature_id).strip()
+        self.name = str(name).strip() or "未命名特征"
+        self.description = str(description).strip() or "无描述"
+        self.file_names = self._safe_list_convert(file_names, str)
+        self.file_hashes = self._safe_list_convert(file_hashes, str)
+        self.file_sizes = self._safe_list_convert(file_sizes, int)
+        self.registry_paths = self._safe_list_convert(registry_paths, str)
+        self.process_names = self._safe_list_convert(process_names, str)
+        self.network_indicators = self._safe_list_convert(network_indicators, str)
+        self.file_paths = self._safe_list_convert(file_paths, str)
+        self.creation_date = self._safe_datetime_convert(creation_date)
+        self.is_active = self._safe_bool_convert(is_active)
+        self.threat_level = max(1, min(5, self._safe_int_convert(threat_level, 3)))
+
+    @staticmethod
+    def _safe_list_convert(value, target_type) -> List:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            value = [value]
+        
+        result = []
+        for item in value:
+            try:
+                if target_type == int and isinstance(item, str):
+                    item = item.replace(',', '').strip()
+                    result.append(target_type(float(item)))
+                else:
+                    result.append(target_type(item))
+            except:
+                continue
+        return result
+
+    @staticmethod
+    def _safe_datetime_convert(value) -> datetime.datetime:
+        if isinstance(value, datetime.datetime):
+            return value
+            
+        date_str = str(value).strip() if value is not None else ""
+        date_formats = [
+            "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
+            "%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y",
+            "%Y年%m月%d日", "%Y年%m月%d日 %H:%M:%S",
+            "%d-%m-%Y", "%d/%m/%Y"
+        ]
+        
+        for fmt in date_formats:
+            try:
+                return datetime.datetime.strptime(date_str, fmt)
+            except:
+                continue
+                
+        try:
+            return datetime.datetime.fromisoformat(date_str)
+        except:
+            return datetime.datetime.now()
+
+    @staticmethod
+    def _safe_bool_convert(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ["true", "1", "yes", "active", "on"]
+        if isinstance(value, int):
+            return value != 0
+        return True
+
+    @staticmethod
+    def _safe_int_convert(value, default: int) -> int:
+        try:
+            return int(float(str(value).strip()))
+        except:
+            return default
+
+
 class SignatureManager:
-    """病毒特征管理工具，支持导入、导出和标准化（优化版）"""
+    """病毒特征管理工具，重点修复JSON解析错误"""
     
     def __init__(self, scanner):
         self.scanner = scanner
@@ -941,17 +1418,246 @@ class SignatureManager:
             "is_active", "threat_level"
         ]
         
-        # 确保特征库目录存在
-        os.makedirs(SIGNATURES_DIR, exist_ok=True)
-    
+        # 确保scanner始终有signatures属性
+        if not hasattr(self.scanner, 'signatures'):
+            self.scanner.signatures = []
+
+    def import_signatures(self, file_path: str, merge: bool = True, debug: bool = False) -> bool:
+        """导入病毒特征库，增强JSON错误处理"""
+        # 1. 文件访问检查
+        access_ok, access_msg = ImportDiagnostic.check_file_access(file_path)
+        if not access_ok:
+            self._log(f"文件访问失败: {access_msg}", "ERROR", debug)
+            return False
+        
+        # 2. 编码检测
+        encoding, confidence = ImportDiagnostic.detect_file_encoding(file_path)
+        self._log(f"检测到文件编码: {encoding} (可信度: {confidence:.2f})", "INFO", debug)
+        
+        # 3. 读取文件内容
+        content = self._read_file_with_fallback_encodings(file_path, encoding)
+        if not content:
+            self._log("无法读取文件内容", "ERROR", debug)
+            return False
+        
+        # 4. 验证并修复JSON结构（增强版）
+        json_ok, signatures_data, json_msg = ImportDiagnostic.validate_json_structure(content)
+        self._log(f"JSON验证结果: {json_msg}", "INFO", debug)
+        
+        if not json_ok:
+            # 尝试多种修复策略
+            fixed_content = self._fix_common_json_issues(content)
+            if fixed_content != content:
+                self._log("已尝试自动修复JSON格式问题", "INFO", debug)
+                json_ok, signatures_data, json_msg = ImportDiagnostic.validate_json_structure(fixed_content)
+                self._log(f"修复后JSON验证结果: {json_msg}", "INFO", debug)
+            
+            # 第二次修复尝试：处理多行JSON和特殊字符
+            if not json_ok:
+                fixed_content = self._advanced_json_fix(fixed_content if fixed_content != content else content)
+                json_ok, signatures_data, json_msg = ImportDiagnostic.validate_json_structure(fixed_content)
+                self._log(f"高级修复后JSON验证结果: {json_msg}", "INFO", debug)
+        
+        if not json_ok:
+            self._log(f"JSON验证失败: {json_msg}", "ERROR", debug)
+            # 提供具体修复建议
+            self._log("建议手动修复JSON文件:", "INFO", debug)
+            self._log("1. 检查行152附近是否有多余的逗号、括号或数据", "INFO", debug)
+            self._log("2. 确保整个文件是一个完整的JSON数组或对象", "INFO", debug)
+            self._log("3. 移除所有注释内容（JSON不支持//或/* */注释）", "INFO", debug)
+            return False
+        
+        # 5. 标准化数据格式
+        if isinstance(signatures_data, dict):
+            signatures_data = [signatures_data]
+            self._log("已将单个特征转换为列表", "INFO", debug)
+        
+        if not isinstance(signatures_data, list):
+            self._log("JSON数据必须是特征列表", "ERROR", debug)
+            return False
+        
+        # 6. 处理每个特征（确保所有有效特征都能被导入）
+        valid_count = 0
+        invalid_count = 0
+        valid_signatures = []
+        
+        for idx, item in enumerate(signatures_data):
+            try:
+                if not isinstance(item, dict):
+                    raise ValueError("特征不是字典类型")
+                
+                item = self._ensure_required_fields(item)
+                unique_id = self._get_unique_signature_id(item["signature_id"])
+                
+                signature = VirusSignature(
+                    signature_id=unique_id,
+                    name=item["name"],
+                    description=item["description"],
+                    file_names=item["file_names"],
+                    file_hashes=item["file_hashes"],
+                    file_sizes=item["file_sizes"],
+                    registry_paths=item["registry_paths"],
+                    process_names=item["process_names"],
+                    network_indicators=item["network_indicators"],
+                    file_paths=item["file_paths"],
+                    creation_date=item["creation_date"],
+                    is_active=item["is_active"],
+                    threat_level=item["threat_level"]
+                )
+                
+                valid_signatures.append(signature)
+                valid_count += 1
+                self._log(f"成功处理第{idx+1}个特征: {unique_id}", "DEBUG", debug)
+                
+            except Exception as e:
+                self._log(f"处理第{idx+1}个特征失败: {str(e)}", "WARNING", debug)
+                invalid_count += 1
+                continue
+        
+        # 7. 保存导入结果（确保特征被正确添加）
+        try:
+            if not merge:
+                self.scanner.signatures = []
+                self._log("已清空现有特征库", "INFO", debug)
+            
+            # 确保特征被正确添加到列表
+            original_count = len(self.scanner.signatures)
+            self.scanner.signatures.extend(valid_signatures)
+            
+            if len(self.scanner.signatures) != original_count + valid_count:
+                self._log("警告: 部分特征未被正确添加到特征库", "WARNING", debug)
+            
+            self._log(
+                f"导入完成 - 总处理: {len(signatures_data)}, "
+                f"成功导入: {valid_count}, "
+                f"导入失败: {invalid_count}", 
+                "SUCCESS", debug
+            )
+            return valid_count > 0
+            
+        except Exception as e:
+            self._log(f"保存导入结果失败: {str(e)}", "ERROR", debug)
+            return False
+
+    def _fix_common_json_issues(self, content: str) -> str:
+        """修复常见的JSON格式问题"""
+        # 移除末尾多余的逗号
+        content = content.replace(",]", "]").replace(",}", "}")
+        
+        # 修复多行字符串中的换行符
+        content = content.replace("\n", "\\n")
+        
+        # 处理可能的注释（JSON不支持注释）
+        import re
+        content = re.sub(r'//.*?\n|/\*.*?\*/', '', content, flags=re.DOTALL)
+        
+        # 修复不规范的引号
+        content = content.replace("'", "\"")
+        
+        return content
+
+    def _advanced_json_fix(self, content: str) -> str:
+        """高级JSON修复，处理复杂格式问题"""
+        import re
+        
+        # 修复未转义的引号
+        content = re.sub(r'(?<!\\)"', '\\"', content)
+        content = content.replace('\\"', '"', 2)  # 保留首尾的引号
+        
+        # 处理多行对象
+        content = re.sub(r'\n\s*{', '{', content)
+        content = re.sub(r'}\s*\n', '},', content)
+        
+        # 尝试检测并提取最大的有效JSON片段
+        try:
+            # 寻找最外层的括号匹配
+            start = content.find('[')
+            end = content.rfind(']')
+            if start != -1 and end != -1 and end > start:
+                return content[start:end+1]
+                
+            start = content.find('{')
+            end = content.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                return content[start:end+1]
+        except:
+            pass
+            
+        return content
+
+    def _ensure_required_fields(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        result = data.copy()
+        for field in self.required_fields:
+            if field not in result:
+                result[field] = self._get_default_value(field)
+                self._log(f"缺失字段 '{field}'，已添加默认值", "WARNING")
+        return result
+
+    def _get_default_value(self, field: str) -> Any:
+        defaults = {
+            "signature_id": f"auto_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}",
+            "name": "未命名特征",
+            "description": "无描述",
+            "file_names": [],
+            "file_hashes": [],
+            "file_sizes": [],
+            "registry_paths": [],
+            "process_names": [],
+            "network_indicators": [],
+            "file_paths": [],
+            "creation_date": datetime.datetime.now(),
+            "is_active": True,
+            "threat_level": 3
+        }
+        return defaults.get(field, None)
+
+    def _read_file_with_fallback_encodings(self, file_path: str, primary_encoding: str) -> Optional[str]:
+        encodings = [primary_encoding, 'utf-8', 'gbk', 'utf-16', 'latin-1', 'utf-8-sig']
+        
+        for encoding in encodings:
+            try:
+                with open(file_path, 'r', encoding=encoding, errors='replace') as f:
+                    content = f.read()
+                    if content.startswith('\ufeff'):
+                        content = content[1:]
+                    return content
+            except Exception as e:
+                self._log(f"使用编码 {encoding} 读取失败: {str(e)}", "WARNING")
+        
+        try:
+            with open(file_path, 'rb') as f:
+                raw_data = f.read()
+                return raw_data.decode('utf-8', errors='replace')
+        except:
+            return None
+
+    def _get_unique_signature_id(self, base_id: str) -> str:
+        existing_ids = {sig.signature_id for sig in self.scanner.signatures}
+        if base_id not in existing_ids:
+            return base_id
+            
+        counter = 1
+        new_id = f"{base_id}_{counter}"
+        while new_id in existing_ids:
+            counter += 1
+            new_id = f"{base_id}_{counter}"
+        return new_id
+
+    def _log(self, message: str, level: str = "INFO", force: bool = False) -> None:
+        if force or hasattr(self.scanner, 'log'):
+            if hasattr(self.scanner, 'log'):
+                self.scanner.log(message, level)
+            else:
+                print(f"[{level}] {message}")
+        elif level in ["ERROR", "WARNING"]:
+            print(f"[{level}] {message}")
+
     def export_signatures(self, file_path: Optional[str] = None) -> str:
-        """导出病毒特征为JSON文件（保持原有逻辑）"""
         try:
             if not file_path:
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                file_path = os.path.join(SIGNATURES_DIR, f"virus_signatures_{timestamp}.json")
+                file_path = os.path.join(SIGNATURES_DIR, f"signatures_{timestamp}.json")
             
-            # 转换特征为可序列化格式
             signatures_data = []
             for sig in self.scanner.signatures:
                 sig_dict = {
@@ -965,187 +1671,20 @@ class SignatureManager:
                     "process_names": sig.process_names,
                     "network_indicators": sig.network_indicators,
                     "file_paths": sig.file_paths,
-                    "creation_date": sig.creation_date.isoformat(),
+                    "creation_date": sig.creation_date.strftime("%Y-%m-%dT%H:%M:%S"),
                     "is_active": sig.is_active,
                     "threat_level": sig.threat_level
                 }
                 signatures_data.append(sig_dict)
             
-            # 写入JSON文件
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(signatures_data, f, ensure_ascii=False, indent=2)
             
-            self.scanner.log(f"病毒特征已导出至: {file_path}", "SUCCESS")
+            self._log(f"特征已导出至: {file_path}", "SUCCESS")
             return file_path
         except Exception as e:
-            self.scanner.log(f"导出病毒特征失败: {str(e)}", "ERROR")
-            return ""
-    
-    def _get_unique_signature_id(self, base_id: str) -> str:
-        """生成唯一的特征ID（处理重复）"""
-        existing_ids = {sig.signature_id for sig in self.scanner.signatures}
-        if base_id not in existing_ids:
-            return base_id
-        
-        # 重复时添加计数器后缀
-        counter = 1
-        new_id = f"{base_id}_{counter}"
-        while new_id in existing_ids:
-            counter += 1
-            new_id = f"{base_id}_{counter}"
-        return new_id
-    
-    def import_signatures(self, file_path: str, merge: bool = True) -> bool:
-        """
-        从JSON文件导入病毒特征（优化版）
-        - 确保所有有效特征都能被添加并显示
-        - 重复特征会自动重命名而非过滤
-        """
-        try:
-            if not os.path.exists(file_path):
-                self.scanner.log(f"特征文件不存在: {file_path}", "ERROR")
-                return False
-            
-            # 读取JSON文件
-            with open(file_path, "r", encoding="utf-8") as f:
-                signatures_data = json.load(f)
-            
-            # 确保数据是列表格式
-            if not isinstance(signatures_data, list):
-                signatures_data = [signatures_data]
-                self.scanner.log("特征文件为单个特征，自动转换为列表格式", "INFO")
-            
-            valid_signatures = []
-            invalid_count = 0
-            
-            for idx, data in enumerate(signatures_data):
-                # 标准化特征数据
-                try:
-                    standardized = self.standardize_signature(data)
-                except Exception as e:
-                    self.scanner.log(f"第{idx+1}个特征标准化失败: {str(e)}", "WARNING")
-                    invalid_count += 1
-                    continue
-                
-                # 验证必要字段
-                missing_fields = [f for f in self.required_fields if f not in standardized]
-                if missing_fields:
-                    self.scanner.log(
-                        f"第{idx+1}个特征数据不完整，缺少字段: {', '.join(missing_fields)}", 
-                        "WARNING"
-                    )
-                    invalid_count += 1
-                    continue
-                
-                # 创建VirusSignature对象（处理重复ID）
-                try:
-                    # 生成唯一ID（关键修改：重复ID自动重命名）
-                    unique_id = self._get_unique_signature_id(standardized["signature_id"])
-                    
-                    # 如果ID被修改，记录日志
-                    if unique_id != standardized["signature_id"]:
-                        self.scanner.log(
-                            f"特征ID '{standardized['signature_id']}' 已存在，自动重命名为 '{unique_id}'", 
-                            "INFO"
-                        )
-                    
-                    signature = VirusSignature(
-                        signature_id=unique_id,  # 使用唯一ID
-                        name=standardized["name"],
-                        description=standardized["description"],
-                        file_names=standardized["file_names"],
-                        file_hashes=standardized["file_hashes"],
-                        file_sizes=standardized["file_sizes"],
-                        registry_paths=standardized["registry_paths"],
-                        process_names=standardized["process_names"],
-                        network_indicators=standardized["network_indicators"],
-                        file_paths=standardized["file_paths"],
-                        creation_date=datetime.datetime.fromisoformat(standardized["creation_date"]),
-                        is_active=standardized["is_active"],
-                        threat_level=standardized["threat_level"]
-                    )
-                    valid_signatures.append(signature)
-                except Exception as e:
-                    self.scanner.log(f"第{idx+1}个特征对象创建失败: {str(e)}", "WARNING")
-                    invalid_count += 1
-                    continue
-            
-            # 应用导入的特征（关键修改：确保全部添加，不过滤）
-            if not merge:
-                self.scanner.signatures = []
-                self.scanner.log("已清空现有特征库", "INFO")
-            
-            # 强制添加所有有效特征（包括重命名后的重复特征）
-            added_count = 0
-            for sig in valid_signatures:
-                self.scanner.signatures.append(sig)  # 直接添加，不做去重检查
-                added_count += 1
-            
-            self.scanner.log(
-                f"特征导入完成 - 总处理: {len(signatures_data)}, "
-                f"有效并添加: {added_count}, "
-                f"无效: {invalid_count}", 
-                "SUCCESS"
-            )
-            return added_count > 0  # 只要有有效特征添加就算成功
-        except Exception as e:
-            self.scanner.log(f"导入病毒特征失败: {str(e)}", "ERROR")
-            return False
-    
-    def standardize_signature(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """标准化病毒特征数据（保持原有逻辑，确保格式正确）"""
-        standardized = {}
-        
-        # 处理必要字段
-        standardized["signature_id"] = data.get("signature_id", f"auto_gen_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}")
-        standardized["name"] = data.get("name", "未命名特征")
-        standardized["description"] = data.get("description", "无描述")
-        
-        # 确保列表类型字段
-        list_fields = [
-            "file_names", "file_hashes", "file_sizes", 
-            "registry_paths", "process_names", 
-            "network_indicators", "file_paths"
-        ]
-        for field in list_fields:
-            value = data.get(field, [])
-            if not isinstance(value, list):
-                standardized[field] = [value] if value else []
-            else:
-                standardized[field] = value
-        
-        # 处理日期字段
-        try:
-            if "creation_date" in data:
-                # 尝试解析多种日期格式
-                date_formats = ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%Y/%m/%d", "%Y-%m-%d %H:%M:%S"]
-                for fmt in date_formats:
-                    try:
-                        dt = datetime.datetime.strptime(str(data["creation_date"]), fmt)
-                        standardized["creation_date"] = dt.isoformat()
-                        break
-                    except ValueError:
-                        continue
-                else:
-                    # 如果所有格式都失败，使用当前时间
-                    standardized["creation_date"] = datetime.datetime.now().isoformat()
-            else:
-                standardized["creation_date"] = datetime.datetime.now().isoformat()
-        except:
-            standardized["creation_date"] = datetime.datetime.now().isoformat()
-        
-        # 处理布尔值字段
-        standardized["is_active"] = bool(data.get("is_active", True))
-        
-        # 处理威胁级别（确保1-5之间的整数）
-        try:
-            threat_level = int(data.get("threat_level", 3))
-            standardized["threat_level"] = max(1, min(5, threat_level))
-        except:
-            standardized["threat_level"] = 3
-            
-        return standardized
-
+            self._log(f"导出失败: {str(e)}", "ERROR")
+            return ""nonlocal
 # -------------------------- 核心扫描器类 --------------------------
 class PirsrcScanner:
     """pirsrc_scan 核心扫描器"""
